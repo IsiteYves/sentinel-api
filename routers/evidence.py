@@ -5,12 +5,12 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 
 from models import DeepfakeResult, EvidenceResponse
 from services.deepfake import analyze_deepfake
 from services.hasher import compute_sha256
-from services.storage import generate_case_id, get_case, store_evidence
+from services.storage import download_evidence_file, generate_case_id, get_case, store_evidence
 from services.timestamp import submit_to_opentimestamps
 
 router = APIRouter(prefix="/evidence", tags=["evidence"])
@@ -146,6 +146,29 @@ async def upload_file(file: UploadFile):
         filename=filename,
         ots_status=ots_status,
         deepfake_result=DeepfakeResult(**deepfake_result),
+    )
+
+
+@router.get("/{case_id}/file")
+async def download_file(case_id: str):
+    """Download the original captured file for independent hash verification."""
+    row = await get_case(case_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    file_path: str = row.get("file_path", "")
+    if not file_path:
+        raise HTTPException(status_code=404, detail="No file stored for this case")
+
+    file_bytes = await download_evidence_file(file_path)
+    ext = os.path.splitext(file_path)[1]
+    content_type = mimetypes.types_map.get(ext, "application/octet-stream")
+    filename = row.get("filename") or f"evidence-{case_id}{ext}"
+
+    return Response(
+        content=file_bytes,
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

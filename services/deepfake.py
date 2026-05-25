@@ -1,9 +1,10 @@
+import base64
 import os
-import httpx
-from typing import Optional
 
-_HIVE_API_KEY: str = os.getenv("HIVE_API_KEY", "")
-_HIVE_ENDPOINT = "https://api.thehive.ai/api/v2/task/sync"
+import httpx
+
+_HIVE_SECRET_KEY: str = os.getenv("HIVE_API_KEY", "")
+_HIVE_ENDPOINT = "https://api.thehive.ai/api/v3/chat/completions"
 
 _ANALYZABLE_TYPES = {
     "image/jpeg",
@@ -14,6 +15,33 @@ _ANALYZABLE_TYPES = {
     "image/tiff",
 }
 
+_PROMPT = (
+    "Analyze this image carefully for signs of deepfake or AI manipulation. "
+    "Look for unnatural facial features, inconsistent lighting, blurred edges, "
+    "artifacts around hair or teeth, or any indication the image is synthetically "
+    "generated or digitally altered to misrepresent reality. "
+    "Respond with: is_deepfake (true if manipulated/AI-generated, false if authentic), "
+    "confidence (integer 0-100), and reason (one sentence explanation)."
+)
+
+_RESPONSE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "deepfake_analysis",
+        "schema": {
+            "type": "object",
+            "required": ["is_deepfake", "confidence", "reason"],
+            "properties": {
+                "is_deepfake": {"type": "boolean"},
+                "confidence": {"type": "number"},
+                "reason": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+}
+
 
 async def analyze_deepfake(
     file_bytes: bytes,
@@ -21,7 +49,7 @@ async def analyze_deepfake(
     filename: str,
 ) -> dict:
     """
-    Send media to Hive AI for deepfake detection.
+    Send media to Hive VLM (V3) for deepfake / AI-manipulation detection.
 
     Returns a dict matching the DeepfakeResult schema:
       status: "analyzed" | "skipped" | "error"
@@ -29,7 +57,7 @@ async def analyze_deepfake(
       confidence: float (0-100) or None
       reason: str or None
     """
-    if not _HIVE_API_KEY:
+    if not _HIVE_SECRET_KEY:
         return {
             "status": "skipped",
             "is_deepfake": None,
@@ -37,7 +65,8 @@ async def analyze_deepfake(
             "reason": "Analysis not configured",
         }
 
-    if content_type not in _ANALYZABLE_TYPES:
+    mime = content_type.split(";")[0].strip()
+    if mime not in _ANALYZABLE_TYPES:
         return {
             "status": "skipped",
             "is_deepfake": None,
@@ -45,33 +74,47 @@ async def analyze_deepfake(
             "reason": "File type not supported for deepfake analysis",
         }
 
+    b64 = base64.b64encode(file_bytes).decode()
+    data_url = f"data:{mime};base64,{b64}"
+
+    payload = {
+        "model": "hive/vision-language-model",
+        "max_tokens": 100,
+        "temperature": 0,
+        "response_format": _RESPONSE_SCHEMA,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _PROMPT},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ],
+    }
+
     try:
         async with httpx.AsyncClient(timeout=45.0) as client:
             resp = await client.post(
                 _HIVE_ENDPOINT,
-                headers={"Authorization": f"Token {_HIVE_API_KEY}"},
-                files={"media": (filename, file_bytes, content_type)},
+                headers={
+                    "Authorization": f"Bearer {_HIVE_SECRET_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
             )
             resp.raise_for_status()
             data = resp.json()
 
-        classes: list = (
-            data.get("status", [{}])[0]
-            .get("response", {})
-            .get("output", [{}])[0]
-            .get("classes", [])
-        )
-        # Hive returns {"class": "yes"/"no", "score": float}
-        # "yes" == this IS a deepfake
-        deepfake_score: float = next(
-            (c["score"] for c in classes if c.get("class") == "yes"), 0.0
-        )
+        import json
+        content = data["choices"][0]["message"]["content"]
+        result = json.loads(content)
 
         return {
             "status": "analyzed",
-            "is_deepfake": deepfake_score > 0.5,
-            "confidence": round(deepfake_score * 100, 1),
-            "reason": None,
+            "is_deepfake": bool(result["is_deepfake"]),
+            "confidence": round(float(result["confidence"]), 1),
+            "reason": result.get("reason"),
         }
 
     except httpx.HTTPStatusError as exc:

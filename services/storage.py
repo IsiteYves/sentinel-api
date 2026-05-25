@@ -39,6 +39,10 @@ def _insert_case_sync(row: dict) -> None:
     _get_client().table("cases").insert(row).execute()
 
 
+def _download_file_sync(file_path: str) -> bytes:
+    return _get_client().storage.from_(_BUCKET).download(file_path)
+
+
 def _fetch_case_sync(case_id: str) -> Optional[dict]:
     result = (
         _get_client()
@@ -92,3 +96,7 @@ async def store_evidence(
 
 async def get_case(case_id: str) -> Optional[dict]:
     return await asyncio.to_thread(_fetch_case_sync, case_id)
+
+
+async def download_evidence_file(file_path: str) -> bytes:
+    return await asyncio.to_thread(_download_file_sync, file_path)
