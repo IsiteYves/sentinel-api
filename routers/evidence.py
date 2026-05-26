@@ -17,6 +17,44 @@ router = APIRouter(prefix="/evidence", tags=["evidence"])
 
 _MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 
+_LOGIN_WALL_PHRASES = [
+    "log in to instagram",
+    "login to instagram",
+    "sign in to instagram",
+    "log in to facebook",
+    "log in to twitter",
+    "sign in to x",
+    "log in to tiktok",
+    "sign in to continue",
+    "you must log in",
+    "create an account",
+    "join instagram",
+    "accounts/login",
+    "login?next=",
+    "signin?redirect",
+]
+
+_LOGIN_WALL_URL_PATTERNS = [
+    "/accounts/login",
+    "/login?",
+    "/signin?",
+    "/sign-in?",
+    "/auth/login",
+]
+
+
+def _is_login_wall(final_url: str, html: bytes) -> bool:
+    url_lower = final_url.lower()
+    if any(p in url_lower for p in _LOGIN_WALL_URL_PATTERNS):
+        return True
+    try:
+        text = html[:8000].decode("utf-8", errors="ignore").lower()
+        if sum(1 for p in _LOGIN_WALL_PHRASES if p in text) >= 2:
+            return True
+    except Exception:
+        pass
+    return False
+
 
 def _extension_from_content_type(content_type: str, filename: str) -> str:
     ext = os.path.splitext(filename)[1]
@@ -62,6 +100,16 @@ async def capture_url(url: str = Form(...)):
         )
 
     content_type: str = resp.headers.get("content-type", "application/octet-stream")
+
+    if "text/html" in content_type and _is_login_wall(str(resp.url), content):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This platform requires login to view content — Sentinel cannot "
+                "capture it directly. Take a screenshot while logged in and use "
+                "the File Upload tab instead."
+            ),
+        )
     case_id = generate_case_id()
     sha256_hash = compute_sha256(content)
     captured_at = datetime.now(timezone.utc)
